@@ -1,0 +1,263 @@
+#!/bin/bash
+
+function echo-step {
+    printf "\n"
+    echo "-----> $1"
+    printf "\n"
+}
+
+function die() {
+    echo >&2 -e "\nERROR: $@\n"
+    exit 1
+}
+
+function run() {
+    $*
+    code=$?
+    [ $code -ne 0 ] && die "command [$*] failed with error code $code"
+}
+
+function cleanup {
+    run sudo rm -r $DEVSTACKDIR
+    run sudo rm -r /opt/stack/tempest
+}
+
+function check-env {
+    echo-step "Environment Variables are..."
+    run env
+}
+
+function prepare-environment {
+    echo-step "Creating Devstack Directory"
+    run mkdir -p $DEVSTACKDIR
+}
+
+function configure-firewall {
+    echo-step "Configuring Firewall"
+    cat <<EOL > $WORKSPACE/firewall.sh
+sudo iptables -I INPUT -p tcp --dport 5672 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 9292 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 9696 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 35357 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 6080 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 8773 -j ACCEPT
+sudo iptables -I INPUT -p udp --dport 8472 -j ACCEPT
+sudo iptables -I INPUT -p udp --dport 4789 -j ACCEPT
+
+# For the client
+sudo iptables -I INPUT -p tcp --dport 5000 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 8774 -j ACCEPT
+
+# For ODL
+sudo iptables -I INPUT -p tcp --dport 8080 -j ACCEPT
+EOL
+    echo "Firewall Configuration is..."
+    run chmod +x $WORKSPACE/firewall.sh
+    run cat $WORKSPACE/firewall.sh
+    run $WORKSPACE/firewall.sh
+}
+
+function install-packages {
+    echo-step "Installing Prerequisite Packages"
+    run sudo yum -q -y install qemu libvirt-daemon
+}
+
+function install-pip {
+    echo-step "Installing python-pip"
+    cd $WORKSPACE
+    run curl -O https://pypi.python.org/packages/source/p/pip/pip-1.4.1.tar.gz -s
+    run tar xzvf pip-1.4.1.tar.gz > /dev/null
+    cd $WORKSPACE/pip-1.4.1
+    run sudo -E python setup.py -q install
+    echo-step "Installing testools"
+    run sudo pip install -q testtools
+}
+
+function install-tempest {
+    echo-step "Cloning and Installing Tempest"
+    run sudo mkdir -p /opt/stack
+    run sudo chown $(whoami) /opt/stack
+    run sudo chmod 755 /opt/stack
+    cd /opt/stack
+    run git clone -q git://git.openstack.org/openstack/tempest.git
+    cd /opt/stack/tempest
+    run sudo python ./setup.py -q install > /dev/null
+
+}
+
+function install-devstack {
+    echo-step "Cloning Devstack"
+    cd $DEVSTACKDIR
+
+    if [ "$GERRIT_PROJECT" == "openstack/devstack" ]; then
+        echo-step "This is a Devstack patch - cloning into $GERRIT_REFSPEC"
+        run git fetch https://$GERRIT_HOST/$GERRIT_PROJECT $GERRIT_REFSPEC
+        run git checkout FETCH_HEAD
+    else
+        run git clone -q https://github.com/openstack-dev/devstack.git
+    fi
+
+    cd $DEVSTACKDIR/devstack
+
+    echo-step "Writing local.conf"
+    cat <<EOLLC > local.conf
+[[local|localrc]]
+LOGFILE=stack.sh.log
+SCREEN_LOGDIR=/opt/stack/data/log
+VERBOSE=True
+LOG_COLOR=False
+#OFFLINE=True
+RECLONE=yes
+GIT_TIMEOUT=0
+
+HOST_IP=$(ip addr | grep inet | grep $IFACE_NAME | awk -F" " '{print $2}'| sed -e 's/\/.*$//')
+HOST_NAME=$(hostname)
+SERVICE_HOST=\$HOST_IP
+SERVICE_HOST_NAME=\$HOST_NAME
+
+Q_HOST=\$SERVICE_HOST
+MYSQL_HOST=\$SERVICE_HOST
+RABBIT_HOST=\$SERVICE_HOST
+GLANCE_HOSTPORT=\$SERVICE_HOST:9292
+KEYSTONE_AUTH_HOST=\$SERVICE_HOST
+KEYSTONE_SERVICE_HOST=\$SERVICE_HOST
+
+MYSQL_PASSWORD=mysql
+RABBIT_PASSWORD=rabbit
+QPID_PASSWORD=rabbit
+SERVICE_TOKEN=service
+SERVICE_PASSWORD=admin
+ADMIN_PASSWORD=admin
+
+disable_service rabbit
+enable_service qpid
+
+enable_service n-cond
+enable_service n-cpu
+disable_service n-net
+enable_service q-svc
+# enable_service q-agt
+enable_service q-dhcp
+enable_service q-l3
+enable_service q-meta
+enable_service quantum
+enable_service tempest
+enable_service odl-server
+enable_service odl-compute
+
+API_RATE_LIMIT=False
+
+Q_PLUGIN=ml2
+Q_ML2_PLUGIN_MECHANISM_DRIVERS=logger,opendaylight
+ODL_MGR_IP=\$SERVICE_HOST
+ODL_ARGS="-Xmx1024m -XX:MaxPermSize=512m"
+ODL_BOOT_WAIT=90
+
+ENABLE_TENANT_TUNNELS=True
+
+EOLLC
+
+    if [ "$GERRIT_PROJECT" == "openstack/neutron" ]; then
+        cat <<EOLLC >> local.conf
+NEUTRON_REPO=https://$GERRIT_HOST/$GERRIT_PROJECT
+NEUTRON_BRANCH=$GERRIT_REFSPEC
+EOLLC
+    fi
+
+    cat <<EOLLC >> local.conf
+
+[[post-config|/etc/neutron/plugins/ml2/ml2_conf.ini]]
+[ml2_odl]
+url=http://\$SERVICE_HOST:8080/controller/nb/v2/neutron
+username=admin
+password=admin
+EOLLC
+
+    echo-step "Local.conf is..."
+    cat local.conf
+
+}
+
+function stack {
+    echo-step "Stacking"
+    ./stack.sh > /dev/null
+
+    if [ "$?" != "0" ]; then
+        echo "stack.sh failed"
+        echo "The last 20 lines of stack.sh.log were..."
+        printf "\n"
+        tail -n 20 $DEVSTACKDIR/devstack/stack.sh.log
+        printf "\n"
+        echo "Please see the Jenkins for the full logs"
+        exit 1
+    fi
+}
+
+function run-tempest {
+    # Run a Tempest test and log results
+    echo-step "Running Tempest"
+    if [[ -n ${BUILD_ID} ]]; then
+        cd /opt/stack/tempest
+
+        echo "Running tempest tests:" > $TEMPEST_RUN_LOG
+        echo "" >> $TEMPEST_RUN_LOG
+        testr init > /dev/null 2>&1 || true
+        cmd="testr run  tempest.api.network.test_networks"
+        echo "opendaylight-test:$ "${cmd}  >> $TEMPEST_RUN_LOG
+        ${cmd} >> $TEMPEST_RUN_LOG
+        echo "" >> $TEMPEST_RUN_LOG
+        echo "" >> $TEMPEST_RUN_LOG
+
+        x=$(grep "id=" $TEMPEST_RUN_LOG)
+        y="${x//[()=]/ }"
+        z=$(echo ${y} | awk '{print $3}' | sed 's/\,//g')
+
+        #echo "x ($x) y ($y) z ($z)"
+
+        echo "List of tempest tests ran (id="${z}"):" >> $TEMPEST_RUN_LOG
+        echo "" >> $TEMPEST_RUN_LOG
+
+        grep -ri successful   .testrepository/${z}  |  awk '{ gsub(/\[/, "\ ");  print $1 " " $2}' >> $TEMPEST_RUN_LOG
+    fi
+}
+
+function archive-logs {
+    echo-step "Archiving Logs"
+
+    mkdir -p $WORKSPACE/logs/devstack
+    mkdir -p $WORKSPACE/logs/tempest
+    mkdir -p $WORKSPACE/logs/opendaylight
+
+    if [ -f /opt/stack/tempest/tempest.log ]; then
+        cp -r /opt/stack/tempest/tempest.log* $WORKSPACE/logs/tempest > /dev/null
+    fi
+
+    stack_logs=$(shopt -s nullglob dotglob; echo /opt/stack/data/logs/*)
+    if (( ${#files} )); then
+        cp -r /opt/stack/data/log/* $WORKSPACE/logs/devstack
+    fi
+
+    if [ -d /opt/stack/opendaylight/opendaylight/logs ]; then
+        cp -r /opt/stack/opendaylight/opendaylight/logs $WORKSPACE/logs/opendaylight > /dev/null
+    fi
+
+    if [ -f $TEMPEST_RUN_LOG ]; then
+        cp -r $TEMPEST_RUN_LOG $WORKSPACE/logs > /dev/null
+        cp -r $TEMPEST_RUN_LOG $WORKSPACE > /dev/null
+    fi
+
+    if [ -f $DEVSTACKDIR/devstack/stack.sh.log ]; then
+        cp -r $DEVSTACKDIR/devstack/stack.sh.log* $WORKSPACE/logs > /dev/null
+    fi
+
+    if [ -f $DEVSTACKDIR/devstack/local.conf ]; then
+        cp -r $DEVSTACKDIR/devstack/local.conf $WORKSPACE/logs > /dev/null
+    fi
+
+    tar cvzf $WORKSPACE/opendaylight-full-logs.tgz $WORKSPACE/logs 2>&1 /dev/null
+
+    cleanup
+
+}
+

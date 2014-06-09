@@ -1,0 +1,9 @@
+#!/bin/bash
+#
+# These env vars need injecting in to Vagrant
+# In prod. these are provided by Jenkins
+
+export WORKSPACE="/home/vagrant"
+export BUILD_TAG="jenkins-openstack-gerrit-1"
+export IFACE_NAME='eth1'
+export BUILD_ID='2014-06-07_18-18-59'

@@ -230,7 +230,7 @@ function archive-logs {
     mkdir -p $WORKSPACE/logs/opendaylight
 
     if [ -f /opt/stack/tempest/tempest.log ]; then
-        cp -r /opt/stack/tempest/tempest.log* $WORKSPACE/logs/tempest > /dev/null
+        cp -r /opt/stack/tempest/tempest.log* $WORKSPACE/logs/tempest
     fi
 
     stack_logs=$(shopt -s nullglob dotglob; echo /opt/stack/data/logs/*)
@@ -239,23 +239,23 @@ function archive-logs {
     fi
 
     if [ -d /opt/stack/opendaylight/opendaylight/logs ]; then
-        cp -r /opt/stack/opendaylight/opendaylight/logs $WORKSPACE/logs/opendaylight > /dev/null
+        cp -r /opt/stack/opendaylight/opendaylight/logs $WORKSPACE/logs/opendaylight
     fi
 
     if [ -f $TEMPEST_RUN_LOG ]; then
-        cp -r $TEMPEST_RUN_LOG $WORKSPACE/logs > /dev/null
-        cp -r $TEMPEST_RUN_LOG $WORKSPACE > /dev/null
+        cp -r $TEMPEST_RUN_LOG $WORKSPACE/logs
+        cp -r $TEMPEST_RUN_LOG $WORKSPACE
     fi
 
     if [ -f $DEVSTACKDIR/devstack/stack.sh.log ]; then
-        cp -r $DEVSTACKDIR/devstack/stack.sh.log* $WORKSPACE/logs > /dev/null
+        cp -r $DEVSTACKDIR/devstack/stack.sh.log* $WORKSPACE/logs
     fi
 
     if [ -f $DEVSTACKDIR/devstack/local.conf ]; then
-        cp -r $DEVSTACKDIR/devstack/local.conf $WORKSPACE/logs > /dev/null
+        cp -r $DEVSTACKDIR/devstack/local.conf $WORKSPACE/logs
     fi
 
-    tar cvzf $WORKSPACE/opendaylight-full-logs.tgz $WORKSPACE/logs 2>&1 /dev/null
+    tar cvzf $WORKSPACE/opendaylight-full-logs.tgz $WORKSPACE/logs
 
     cleanup
 
